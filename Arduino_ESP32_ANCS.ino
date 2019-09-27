@@ -1,3 +1,6 @@
+// Original: https://github.com/S-March/esp32_ANCS
+// fixed for Arduino15/packages/esp32/hardware/esp32/1.0.3
+
 #include <Arduino.h>
 #include "BLEDevice.h"
 #include "BLEServer.h"
@@ -7,7 +10,7 @@
 #include <esp_log.h>
 #include <esp_bt_main.h>
 #include <string>
-#include <Task.h>
+#include "Task.h"
 #include <sys/time.h>
 #include <time.h>
 #include "sdkconfig.h"
@@ -70,6 +73,7 @@ static void NotificationSourceNotifyCallback(
     if(pData[0]==0)
     {
         Serial.println("New notification!");
+        Serial.print("  ");
         switch(pData[2])
         {
             case 0:
@@ -168,14 +172,14 @@ class MyClient: public Task {
 }; // MyClient
 
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
         Serial.println("********************");
         Serial.println("**Device connected**");
-        Serial.println(BLEAddress(BLEDevice::m_remoteBda).toString().c_str());
+        Serial.println(BLEAddress(param->connect.remote_bda).toString().c_str());
         Serial.println("********************");
         MyClient* pMyClient = new MyClient();
         pMyClient->setStackSize(18000);
-        pMyClient->start(new BLEAddress(BLEDevice::m_remoteBda));
+        pMyClient->start(new BLEAddress(param->connect.remote_bda));
     };
 
     void onDisconnect(BLEServer* pServer) {
@@ -203,7 +207,7 @@ class MainBLEServer: public Task {
         BLEAdvertising *pAdvertising = pServer->getAdvertising();
         BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
         oAdvertisementData.setFlags(0x01);
-        oAdvertisementData.setServiceSolicitation(BLEUUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0"));
+        _setServiceSolicitation(&oAdvertisementData, BLEUUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0"));
         pAdvertising->setAdvertisementData(oAdvertisementData);        
 
         // Set security
@@ -218,6 +222,38 @@ class MainBLEServer: public Task {
         ESP_LOGD(LOG_TAG, "Advertising started!");
         delay(portMAX_DELAY);
     }
+
+    
+    /**
+     * @brief Set the service solicitation (UUID)
+     * @param [in] uuid The UUID to set with the service solicitation data.  Size of UUID will be used.
+     */
+    void _setServiceSolicitation(BLEAdvertisementData *a, BLEUUID uuid)
+    {
+      char cdata[2];
+      switch(uuid.bitSize()) {
+        case 16: {
+          // [Len] [0x14] [UUID16] data
+          cdata[0] = 3;
+          cdata[1] = ESP_BLE_AD_TYPE_SOL_SRV_UUID;  // 0x14
+          a->addData(std::string(cdata, 2) + std::string((char *)&uuid.getNative()->uuid.uuid16,2));
+          break;
+        }
+    
+        case 128: {
+          // [Len] [0x15] [UUID128] data
+          cdata[0] = 17;
+          cdata[1] = ESP_BLE_AD_TYPE_128SOL_SRV_UUID;  // 0x15
+          a->addData(std::string(cdata, 2) + std::string((char *)uuid.getNative()->uuid.uuid128,16));
+          break;
+        }
+    
+        default:
+          return;
+      }
+    } // setServiceSolicitationData
+
+    
 };
 
 void SampleSecureServer(void)
