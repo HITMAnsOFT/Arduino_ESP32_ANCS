@@ -14,6 +14,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include "sdkconfig.h"
+#include <M5StickC.h>
 
 static char LOG_TAG[] = "SampleServer";
 
@@ -53,70 +54,28 @@ class MySecurity : public BLESecurityCallbacks {
     }
 };
 
-static void dataSourceNotifyCallback(
-  BLERemoteCharacteristic* pDataSourceCharacteristic,
-  uint8_t* pData,
-  size_t length,
-  bool isNotify) {
-    Serial.print("Notify callback for characteristic ");
-    Serial.print(pDataSourceCharacteristic->getUUID().toString().c_str());
-    Serial.print(" of data length ");
-    Serial.println(length);
-}
+bool connected = false;
 
-static void NotificationSourceNotifyCallback(
-  BLERemoteCharacteristic* pNotificationSourceCharacteristic,
-  uint8_t* pData,
-  size_t length,
-  bool isNotify)
-{
-    if(pData[0]==0)
-    {
-        Serial.println("New notification!");
-        Serial.print("  ");
-        switch(pData[2])
-        {
-            case 0:
-                Serial.println("Category: Other");
-            break;
-            case 1:
-                Serial.println("Category: Incoming call");
-            break;
-            case 2:
-                Serial.println("Category: Missed call");
-            break;
-            case 3:
-                Serial.println("Category: Voicemail");
-            break;
-            case 4:
-                Serial.println("Category: Social");
-            break;
-            case 5:
-                Serial.println("Category: Schedule");
-            break;
-            case 6:
-                Serial.println("Category: Email");
-            break;
-            case 7:
-                Serial.println("Category: News");
-            break;
-            case 8:
-                Serial.println("Category: Health");
-            break;
-            case 9:
-                Serial.println("Category: Business");
-            break;
-            case 10:
-                Serial.println("Category: Location");
-            break;
-            case 11:
-                Serial.println("Category: Entertainment");
-            break;
-            default:
-            break;
-        }
-    }
-}
+#define CATEGORY_TABLE_SIZE 12
+int notification_counts[CATEGORY_TABLE_SIZE] = {0,0,0,0,0,0,0,0,0,0,0,0};
+char* category_table[CATEGORY_TABLE_SIZE] = {
+  "Other",         //  0
+  "Incoming call", //  1
+  "Missed call",   //  2
+  "Voicemail",     //  3
+  "Social",        //  4
+  "Schedule",      //  5
+  "Email",         //  6
+  "News",          //  7
+  "Health",        //  8
+  "Business",      //  9
+  "Location",      // 10
+  "Entertainment", // 11
+};
+#define CATEGORY_INCOMING_CALL 1
+
+static void _dataSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify);
+static void _notificationSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify);
 
 /**
  * Become a BLE client to a remote BLE server.  We are passed in the address of the BLE server
@@ -163,42 +122,63 @@ class MyClient: public Task {
             return;
         }        
         const uint8_t v[]={0x1,0x0};
-        pDataSourceCharacteristic->registerForNotify(dataSourceNotifyCallback);
+        pDataSourceCharacteristic->registerForNotify(_dataSourceNotifyCallback);
         pDataSourceCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)v,2,true);
-        pNotificationSourceCharacteristic->registerForNotify(NotificationSourceNotifyCallback);
+        pNotificationSourceCharacteristic->registerForNotify(_notificationSourceNotifyCallback);
         pNotificationSourceCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)v,2,true);
         /** END ANCS SERVICE **/
     } // run
+
+    public:
+    void dataSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify){
+      Serial.print("Notify callback for characteristic ");
+      Serial.print(pCharacteristic->getUUID().toString().c_str());
+      Serial.print(" of data length ");
+      Serial.println(length);
+    }
+
+    public:
+    void notificationSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify){
+      if(pData[0]==0){
+        uint8_t category_id = pData[2];
+        notification_counts[category_id]++;
+        Serial.printf("New notification! Category: %s(%d) count=%d\n", category_table[category_id], category_id, notification_counts[category_id]);
+      }else
+      if(pData[0]==1){
+        Serial.printf("Notification modified!\n");
+      }else
+      if(pData[0]==2){
+        uint8_t category_id = pData[2];
+        notification_counts[category_id]--;
+        Serial.printf("Notification removed! Category: %s(%d) count=%d\n", category_table[category_id], category_id, notification_counts[category_id]);
+      }
+      Serial.printf("  pData=");
+      for(int i=0; i<length; i++){
+        Serial.printf("%02X ", pData[i]);
+      }
+      Serial.printf("length=%d isNotify=%d\n", length, isNotify);
+    }
 }; // MyClient
 
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
-        Serial.println("********************");
-        Serial.println("**Device connected**");
-        Serial.println(BLEAddress(param->connect.remote_bda).toString().c_str());
-        Serial.println("********************");
-        MyClient* pMyClient = new MyClient();
-        pMyClient->setStackSize(18000);
-        pMyClient->start(new BLEAddress(param->connect.remote_bda));
-    };
+MyClient* pMyClient = NULL; // only one instance....
+static void _dataSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+    pMyClient->dataSourceNotifyCallback(pCharacteristic, pData, length, isNotify);
+}
+static void _notificationSourceNotifyCallback(BLERemoteCharacteristic* pCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+    pMyClient->notificationSourceNotifyCallback(pCharacteristic, pData, length, isNotify);
+}
 
-    void onDisconnect(BLEServer* pServer) {
-        Serial.println("************************");
-        Serial.println("**Device  disconnected**");
-        Serial.println("************************");
-    }
-};
 
-class MainBLEServer: public Task {
+class MainBLEServer: public Task, public BLEServerCallbacks {
     void run(void *data) {
         ESP_LOGD(LOG_TAG, "Starting BLE work!");
         esp_log_buffer_char(LOG_TAG, LOG_TAG, sizeof(LOG_TAG));
         esp_log_buffer_hex(LOG_TAG, LOG_TAG, sizeof(LOG_TAG));
 
         // Initialize device
-        BLEDevice::init("ANCS");
+        BLEDevice::init("Watch");
         BLEServer* pServer = BLEDevice::createServer();
-        pServer->setCallbacks(new MyServerCallbacks());
+        pServer->setCallbacks(this);
         BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
         BLEDevice::setSecurityCallbacks(new MySecurity());
 
@@ -223,7 +203,30 @@ class MainBLEServer: public Task {
         delay(portMAX_DELAY);
     }
 
-    
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
+        Serial.println("********************");
+        Serial.println("**Device connected**");
+        Serial.println(BLEAddress(param->connect.remote_bda).toString().c_str());
+        Serial.println("********************");
+        if(pMyClient != NULL){
+          Serial.println("...invalid state...");
+          return;
+        }
+        pMyClient = new MyClient();
+        pMyClient->setStackSize(18000);
+        pMyClient->start(new BLEAddress(param->connect.remote_bda));
+        connected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+        Serial.println("************************");
+        Serial.println("**Device  disconnected**");
+        Serial.println("************************");
+
+        // reboot
+        M5.Axp.DeepSleep(SLEEP_SEC(1));
+    }
+
     /**
      * @brief Set the service solicitation (UUID)
      * @param [in] uuid The UUID to set with the service solicitation data.  Size of UUID will be used.
@@ -263,11 +266,115 @@ void SampleSecureServer(void)
     pMainBleServer->start();
 }
 
+
+#define LED_BUILTIN 10
+
 void setup()
 {
-    Serial.begin(115200);
-    SampleSecureServer();
+  M5.begin(false);
+  M5.Axp.ScreenBreath(7);
+  M5.Lcd.begin();
+
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setRotation(1);
+  M5.Lcd.setTextFont(1);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+  pinMode(M5_BUTTON_HOME, INPUT);
+
+  Serial.begin(115200);
+  SampleSecureServer();
 }
+
 void loop()
-{   
+{
+  bool led = false;
+  int toral_count = 0;
+  for(int i=0; i<CATEGORY_TABLE_SIZE; i++){
+    toral_count += notification_counts[i];
+  }
+  if(!connected && 3*1000 < millis()){
+    led = (millis() / 200 % 2 == 0);
+  }else
+  if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
+    led = (millis() / 100 % 2 == 0);
+  }else
+  if(0 < toral_count){
+    led = (millis() / 100 % 100 == 0);
+  }else{
+    led = false;
+  }
+  digitalWrite(LED_BUILTIN, led ? LOW : HIGH);
+  display();
+  delay(20);
+}
+
+
+void display()
+{
+  static int last_counter = 0;
+  int counter = millis() / 100;
+  if(counter == last_counter){ return; }
+  last_counter = counter;
+
+  if(!connected && 3*1000 < millis()){
+    uint16_t c0 = YELLOW;
+    uint16_t c1 = RED;
+    switch(counter / 3 % 2){
+    case 0:
+      c0 = YELLOW;
+      c1 = RED;
+      break;
+    case 1:
+      c0 = RED;
+      c1 = YELLOW;
+      break;
+    }
+    M5.Axp.ScreenBreath(15);
+    M5.Lcd.fillScreen(c1);
+    M5.Lcd.setTextSize(4);
+    M5.Lcd.setCursor(3, 3, 1);
+    M5.Lcd.setTextColor(c0, c1);
+    M5.Lcd.printf("Misplaced!?");
+  }else
+  if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
+    switch(counter / 10 % 2){
+    case 0:
+      M5.Axp.ScreenBreath(15);
+      M5.Lcd.fillScreen(BLACK);
+      M5.Lcd.setTextSize(4);
+      M5.Lcd.setCursor(3, 3, 1);
+      M5.Lcd.setTextColor(GREEN, BLACK);
+      M5.Lcd.printf("Calling...");
+      break;
+    case 1:
+      M5.Axp.ScreenBreath(0);
+      M5.Lcd.fillScreen(BLACK);
+      break;
+    }
+  }else{
+    RTC_TimeTypeDef RTC_TimeStruct;
+    M5.Rtc.GetTime(&RTC_TimeStruct);
+    if(RTC_TimeStruct.Seconds <= 5){
+      if(RTC_TimeStruct.Minutes == 0){
+        M5.Axp.ScreenBreath(15);
+      }else
+      if(RTC_TimeStruct.Minutes % 15 == 0){
+        M5.Axp.ScreenBreath(12);
+      }else{
+        M5.Axp.ScreenBreath(8);
+      }
+      RTC_DateTypeDef RTC_DateStruct;
+      M5.Rtc.GetData(&RTC_DateStruct);
+      M5.Lcd.setCursor(3, 3, 7);
+      M5.Lcd.setTextSize(1);
+      M5.Lcd.setTextColor(ORANGE, BLACK);
+      M5.Lcd.printf("%02d:%02d", RTC_TimeStruct.Hours, RTC_TimeStruct.Minutes);
+      Serial.printf("%04d-%02d-%02d(%d) %02d:%02d:%02d\n", RTC_DateStruct.Year, RTC_DateStruct.Month, RTC_DateStruct.Date, RTC_DateStruct.WeekDay, RTC_TimeStruct.Hours, RTC_TimeStruct.Minutes, RTC_TimeStruct.Seconds);
+    }else{
+      M5.Axp.ScreenBreath(0);
+      M5.Lcd.fillScreen(BLACK);
+    }
+  }
 }
