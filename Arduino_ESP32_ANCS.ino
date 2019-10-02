@@ -1,20 +1,19 @@
 // Original: https://github.com/S-March/esp32_ANCS
 // fixed for Arduino15/packages/esp32/hardware/esp32/1.0.3
 
-#include <Arduino.h>
 #include "BLEDevice.h"
-#include "BLEServer.h"
-#include "BLEClient.h"
-#include "BLEUtils.h"
-#include "BLE2902.h"
-#include <esp_log.h>
-#include <esp_bt_main.h>
-#include <string>
 #include "Task.h"
-#include <sys/time.h>
-#include <time.h>
-#include "sdkconfig.h"
 #include <M5StickC.h>
+
+#if 1
+  #include "core_version.h"
+  #ifndef ARDUINO_ESP32_RELEASE_1_0_3
+    #error "WARNING: version changed."
+  #endif
+  #if ARDUINO_ESP32_GIT_VER != 0x07390157
+    #error "WARNING: version changed."
+  #endif
+#endif
 
 static char LOG_TAG[] = "SampleServer";
 
@@ -83,7 +82,6 @@ static void _notificationSourceNotifyCallback(BLERemoteCharacteristic* pCharacte
  */
 class MyClient: public Task {
     void run(void* data) {
-
         BLEAddress* pAddress = (BLEAddress*)data;
         BLEClient*  pClient  = BLEDevice::createClient();
         BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
@@ -127,6 +125,14 @@ class MyClient: public Task {
         pNotificationSourceCharacteristic->registerForNotify(_notificationSourceNotifyCallback);
         pNotificationSourceCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)v,2,true);
         /** END ANCS SERVICE **/
+
+        while(1){
+          if(updateRTC(pClient)){
+            delay(1000 * 60 * 5);
+          }else{
+            delay(1000);
+          }
+        }
     } // run
 
     public:
@@ -157,6 +163,43 @@ class MyClient: public Task {
         Serial.printf("%02X ", pData[i]);
       }
       Serial.printf("length=%d isNotify=%d\n", length, isNotify);
+    }
+
+    bool updateRTC(BLEClient* pClient)
+    {
+      // Get current time from iPhone's "Current Time Service"
+      std::string s = pClient->getValue(BLEUUID((uint16_t)0x1805), BLEUUID((uint16_t)0x2A2B));
+      if(s.length() == 10){
+        Serial.printf("CurrentTimeService: length=%d data=[", s.length());
+        for(int i=0; i<s.length(); i++){
+          Serial.printf("%02X ", s.c_str()[i]);
+        }
+        Serial.printf("] ");
+        uint16_t year   = *((uint16_t*)(s.c_str() + 0));
+        uint8_t  month  = *((uint8_t* )(s.c_str() + 2));
+        uint8_t  day    = *((uint8_t* )(s.c_str() + 3));
+        uint8_t  hour   = *((uint8_t* )(s.c_str() + 4));
+        uint8_t  minute = *((uint8_t* )(s.c_str() + 5));
+        uint8_t  second = *((uint8_t* )(s.c_str() + 6));
+        uint8_t  wday   = *((uint8_t* )(s.c_str() + 7));
+        Serial.printf("%04d-%02d-%02d(%d) %02d:%02d:%02d\n", year, month, day, wday, hour, minute, second);
+
+        RTC_DateTypeDef DateStruct;
+        DateStruct.Year    = year;
+        DateStruct.Month   = month;
+        DateStruct.Date    = day;
+        DateStruct.WeekDay = wday;
+        M5.Rtc.SetData(&DateStruct);
+
+        RTC_TimeTypeDef TimeStruct;
+        TimeStruct.Hours   = hour;
+        TimeStruct.Minutes = minute;
+        TimeStruct.Seconds = second;
+        M5.Rtc.SetTime(&TimeStruct);
+
+        return true;
+      }
+      return false;
     }
 }; // MyClient
 
@@ -314,11 +357,26 @@ void loop()
 void display()
 {
   static int last_counter = 0;
+  static int counter_offset = -1;
+  static RTC_DateTypeDef rtc_date;
+  static RTC_TimeTypeDef rtc_time;
+
   int counter = millis() / 100;
-  if(counter == last_counter){ return; }
+  if(counter <= last_counter){ return; }
   last_counter = counter;
 
-  if(!connected && 3*1000 < millis()){
+  int second_x10 = (counter + counter_offset) %600;
+  int minute     = (counter + counter_offset) /10/60%60;
+  int hour       = (counter + counter_offset) /10/3600%24;
+
+  if(counter_offset == -1 || (minute%10==9 && second_x10==0)){
+    M5.Rtc.GetData(&rtc_date);
+    M5.Rtc.GetTime(&rtc_time);
+    Serial.printf("RTC=%04d-%02d-%02d(%d) %02d:%02d:%02d hour=%d minute=%d second_x10=%d counter_offset=%d\n", rtc_date.Year, rtc_date.Month, rtc_date.Date, rtc_date.WeekDay, rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds, hour, minute, second_x10, counter_offset);
+    counter_offset = 10 * ((rtc_time.Hours - counter/10/3600%24) * 3600 + (rtc_time.Minutes - counter/10/60%60) * 60 + (rtc_time.Seconds - counter/10%60));
+    Serial.printf("new counter_offset=%d\n", counter_offset);
+  }else
+  if(!connected && 300 < counter){
     uint16_t c0 = YELLOW;
     uint16_t c1 = RED;
     switch(counter / 3 % 2){
@@ -353,28 +411,31 @@ void display()
       M5.Lcd.fillScreen(BLACK);
       break;
     }
-  }else{
-    RTC_TimeTypeDef RTC_TimeStruct;
-    M5.Rtc.GetTime(&RTC_TimeStruct);
-    if(RTC_TimeStruct.Seconds <= 5){
-      if(RTC_TimeStruct.Minutes == 0){
-        M5.Axp.ScreenBreath(15);
-      }else
-      if(RTC_TimeStruct.Minutes % 15 == 0){
-        M5.Axp.ScreenBreath(12);
-      }else{
-        M5.Axp.ScreenBreath(8);
-      }
-      RTC_DateTypeDef RTC_DateStruct;
-      M5.Rtc.GetData(&RTC_DateStruct);
-      M5.Lcd.setCursor(3, 3, 7);
-      M5.Lcd.setTextSize(1);
-      M5.Lcd.setTextColor(ORANGE, BLACK);
-      M5.Lcd.printf("%02d:%02d", RTC_TimeStruct.Hours, RTC_TimeStruct.Minutes);
-      Serial.printf("%04d-%02d-%02d(%d) %02d:%02d:%02d\n", RTC_DateStruct.Year, RTC_DateStruct.Month, RTC_DateStruct.Date, RTC_DateStruct.WeekDay, RTC_TimeStruct.Hours, RTC_TimeStruct.Minutes, RTC_TimeStruct.Seconds);
+  }else
+  if(590 < second_x10 || second_x10 < 10){
+  //if(second_x10 % 100 < 10){
+  //if(second_x10 % 20 == 0){
+    uint16_t c0 = ORANGE;
+    uint16_t c1 = BLACK;
+    if(minute == 0){
+      M5.Axp.ScreenBreath(15);
+      c0 = BLACK;
+      c1 = ORANGE;
+    }else
+    if(minute % 15 == 0){
+      M5.Axp.ScreenBreath(12);
+      c0 = BLACK;
+      c1 = ORANGE;
     }else{
-      M5.Axp.ScreenBreath(0);
-      M5.Lcd.fillScreen(BLACK);
+      M5.Axp.ScreenBreath(7);
     }
+
+    M5.Lcd.setCursor(3, 3, 7);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextColor(c0, c1);
+    M5.Lcd.printf("%02d:%02d", hour, minute);
+  }else{
+    M5.Axp.ScreenBreath(0);
+    M5.Lcd.fillScreen(BLACK);
   }
 }
