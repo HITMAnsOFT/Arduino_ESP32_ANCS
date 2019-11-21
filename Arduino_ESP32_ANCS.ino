@@ -308,13 +308,46 @@ void SampleSecureServer(void)
     pMainBleServer->start();
 }
 
-
 #define LedPin 19
 #define IrPin 17
 #define BuzzerPin 26
 #define BtnPin 35
 U8G2_SH1107_64X128_F_4W_HW_SPI u8g2(U8G2_R1, 14, /* dc=*/ 27, /* reset=*/ 33);
 const int CURRENT_100MA = (0x01 << 0);
+
+static bool isRinging = false;
+
+void buzz(bool on)
+{
+  ledcWrite(1, on ? 8 : 0);
+}
+
+class Ringer: public Task {
+  void run(void* data)
+  {
+    ledcSetup(1, 1000, 4);
+    ledcAttachPin(BuzzerPin, 1);
+    ledcWrite(1, 0);
+    while (true) {
+      bool b = isRinging;
+      isRinging = false;
+      buzz(b);
+      delay(100);
+      buzz(false);
+      delay(100);
+      buzz(b);
+      delay(100);
+      buzz(false);
+      delay(500);
+    }
+  }
+};
+
+void startRinger()
+{
+  Ringer* r = new Ringer();
+  r->start();
+}
 
 void u8g2_setup()
 {
@@ -337,6 +370,7 @@ void setup()
   pinMode(BtnPin, INPUT_PULLUP);
   Serial.begin(115200);
   SampleSecureServer();
+  startRinger();
 }
 
 int toral_count = 0;
@@ -414,6 +448,7 @@ void display()
     switch(counter / 10 % 2){
     case 0:
       screenOn = true;
+      isRinging = true;
       u8g2_prepare();
       u8g2.drawUTF8(3, 25, "Incoming call!");
       break;
