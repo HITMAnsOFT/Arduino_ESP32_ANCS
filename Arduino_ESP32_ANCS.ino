@@ -3,9 +3,14 @@
 
 #include "BLEDevice.h"
 #include "Task.h"
-#include <M5StickC.h>
+#include <U8g2lib.h>
+#include <soc/rtc.h>
+#include <M5Stack.h>
 
-#if 1
+// surplus macro from M5Stack LCD library
+#undef setFont
+
+#if 0
   #include "core_version.h"
   #ifndef ARDUINO_ESP32_RELEASE_1_0_3
     #error "WARNING: version changed."
@@ -22,6 +27,7 @@ static BLEUUID notificationSourceCharacteristicUUID("9FBF120D-6301-42D9-8C58-25E
 static BLEUUID controlPointCharacteristicUUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
 static BLEUUID dataSourceCharacteristicUUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
 
+time_t timeOffset {};
 class MySecurity : public BLESecurityCallbacks {
 
     uint32_t onPassKeyRequest(){
@@ -184,19 +190,18 @@ class MyClient: public Task {
         uint8_t  wday   = *((uint8_t* )(s.c_str() + 7));
         Serial.printf("%04d-%02d-%02d(%d) %02d:%02d:%02d\n", year, month, day, wday, hour, minute, second);
 
-        RTC_DateTypeDef DateStruct;
-        DateStruct.Year    = year;
-        DateStruct.Month   = month;
-        DateStruct.Date    = day;
-        DateStruct.WeekDay = wday;
-        M5.Rtc.SetData(&DateStruct);
+        struct tm tmNow {};
+        tmNow.tm_year = year - 1900;
+        tmNow.tm_mon = month - 1;
+        tmNow.tm_mday = day;
+        tmNow.tm_hour = hour;
+        tmNow.tm_min  = minute;
+        tmNow.tm_sec = second;
+        tmNow.tm_wday = wday;
 
-        RTC_TimeTypeDef TimeStruct;
-        TimeStruct.Hours   = hour;
-        TimeStruct.Minutes = minute;
-        TimeStruct.Seconds = second;
-        M5.Rtc.SetTime(&TimeStruct);
-
+        time_t now = mktime(&tmNow);
+        time_t rtc = time(0);
+        timeOffset = now - rtc;
         return true;
       }
       return false;
@@ -256,7 +261,7 @@ class MainBLEServer: public Task, public BLEServerCallbacks {
           return;
         }
         pMyClient = new MyClient();
-        pMyClient->setStackSize(18000);
+        pMyClient->setStackSize(20000);
         pMyClient->start(new BLEAddress(param->connect.remote_bda));
         connected = true;
     };
@@ -267,7 +272,9 @@ class MainBLEServer: public Task, public BLEServerCallbacks {
         Serial.println("************************");
 
         // reboot
-        M5.Axp.DeepSleep(SLEEP_SEC(1));
+        esp_sleep_enable_timer_wakeup(1000000);
+        Serial.flush();
+        esp_deep_sleep_start();
     }
 
     /**
@@ -310,132 +317,184 @@ void SampleSecureServer(void)
 }
 
 
-#define LED_BUILTIN 10
+#define LedPin 19
+#define IrPin 17
+#define BuzzerPin 26
+#define BtnPin 35
+U8G2_SH1107_64X128_F_4W_HW_SPI u8g2(U8G2_R1, 14, /* dc=*/ 27, /* reset=*/ 33);
+#define IP5306_REG_SYS_CTL1 (0x01)
+#define BOOST_ENABLE_BIT (0x20)
+#define IP5306_ADDR (117) // 0x75
+#define CURRENT_100MA  (0x01 << 0)
 
 void setup()
 {
-  M5.begin(false);
-  M5.Axp.ScreenBreath(7);
-  M5.Lcd.begin();
-
-  M5.Lcd.fillScreen(BLACK);
-  M5.Lcd.setRotation(1);
-  M5.Lcd.setTextFont(1);
-
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH);
-  pinMode(M5_BUTTON_HOME, INPUT);
-
+  //rtc_clk_cpu_freq_set(RTC_CPU_FREQ_80M);
+  M5.Power.begin();
+  M5.Power.setPowerBoostKeepOn(true);
+  M5.Power.setVinMaxCurrent(CURRENT_100MA);
+  u8g2.begin();
+  pinMode(LedPin, OUTPUT);
+  digitalWrite(LedPin, LOW);
+  pinMode(BtnPin, INPUT_PULLUP);
   Serial.begin(115200);
   SampleSecureServer();
 }
 
+int toral_count = 0;
+
 void loop()
 {
-  bool led = false;
-  int toral_count = 0;
-  for(int i=0; i<CATEGORY_TABLE_SIZE; i++){
-    toral_count += notification_counts[i];
-  }
-  if(!connected && 3*1000 < millis()){
-    led = (millis() / 200 % 2 == 0);
-  }else
-  if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
-    led = (millis() / 100 % 2 == 0);
-  }else
-  if(0 < toral_count){
-    led = (millis() / 100 % 100 == 0);
-  }else{
-    led = false;
-  }
-  digitalWrite(LED_BUILTIN, led ? LOW : HIGH);
-  display();
-  delay(20);
+    bool led = false;
+    toral_count = 0;
+    for(int i=0; i<CATEGORY_TABLE_SIZE; i++){
+        toral_count += notification_counts[i];
+    }
+    if(!connected && 3*1000 < millis()){
+        led = (millis() / 200 % 2 == 0);
+    }else if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
+        led = (millis() / 100 % 2 == 0);
+    }else if(0 < toral_count){
+        led = (millis() / 100 % 100 == 0);
+    }else{
+        led = false;
+    }
+    digitalWrite(LedPin, led ? HIGH : LOW);
+    display();
+    delay(50);
 }
 
+void u8g2_prepare(void) {
+  u8g2.setPowerSave(0);
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.setFontRefHeightExtendedText();
+  u8g2.setDrawColor(1);
+  u8g2.setFontPosTop();
+  u8g2.setFontDirection(0);
+  u8g2.setContrast(10);
+}
+
+void fillBuffer(uint8_t color)
+{
+    u8g2.setDrawColor(color);
+    u8g2.drawBox(0, 0, u8g2.getDisplayWidth(), u8g2.getDisplayHeight());
+}
 
 void display()
 {
   static int last_counter = 0;
   static int counter_offset = -1;
-  static RTC_DateTypeDef rtc_date;
-  static RTC_TimeTypeDef rtc_time;
-
   int counter = millis() / 100;
   if(counter <= last_counter){ return; }
   last_counter = counter;
+  static struct tm* rtc_time {};
+  static bool screenOn = true;
 
   int second_x10 = (counter + counter_offset) %600;
   int minute     = (counter + counter_offset) /10/60%60;
   int hour       = (counter + counter_offset) /10/3600%24;
 
-  if(counter_offset == -1 || (minute%10==9 && second_x10==0)){
-    M5.Rtc.GetData(&rtc_date);
-    M5.Rtc.GetTime(&rtc_time);
-    Serial.printf("RTC=%04d-%02d-%02d(%d) %02d:%02d:%02d hour=%d minute=%d second_x10=%d counter_offset=%d\n", rtc_date.Year, rtc_date.Month, rtc_date.Date, rtc_date.WeekDay, rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds, hour, minute, second_x10, counter_offset);
-    counter_offset = 10 * ((rtc_time.Hours - counter/10/3600%24) * 3600 + (rtc_time.Minutes - counter/10/60%60) * 60 + (rtc_time.Seconds - counter/10%60));
+  if(counter_offset == -1 || (minute%10==0 && second_x10==0)){
+    if (!timeOffset) {
+      return;
+    }
+    time_t now = time(0) + timeOffset;
+    rtc_time = localtime(&now);
+    Serial.printf("RTC=%s hour=%d minute=%d second_x10=%d counter_offset=%d\n", asctime(rtc_time), hour, minute, second_x10, counter_offset);
+    counter_offset = 10 * ((rtc_time->tm_hour - counter/10/3600%24) * 3600 + (rtc_time->tm_min - counter/10/60%60) * 60 + (rtc_time->tm_sec - counter/10%60));
     Serial.printf("new counter_offset=%d\n", counter_offset);
   }else
   if(!connected && 300 < counter){
-    uint16_t c0 = YELLOW;
-    uint16_t c1 = RED;
     switch(counter / 3 % 2){
     case 0:
-      c0 = YELLOW;
-      c1 = RED;
+      screenOn = true;
+      u8g2_prepare();
+      u8g2.clearBuffer();
+      u8g2.drawUTF8(3, 3, "Misplaced!?");
       break;
     case 1:
-      c0 = RED;
-      c1 = YELLOW;
+      u8g2.clearBuffer();
       break;
     }
-    M5.Axp.ScreenBreath(15);
-    M5.Lcd.fillScreen(c1);
-    M5.Lcd.setTextSize(4);
-    M5.Lcd.setCursor(3, 3, 1);
-    M5.Lcd.setTextColor(c0, c1);
-    M5.Lcd.printf("Misplaced!?");
+    u8g2.sendBuffer();
   }else
   if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
     switch(counter / 10 % 2){
     case 0:
-      M5.Axp.ScreenBreath(15);
-      M5.Lcd.fillScreen(BLACK);
-      M5.Lcd.setTextSize(4);
-      M5.Lcd.setCursor(3, 3, 1);
-      M5.Lcd.setTextColor(GREEN, BLACK);
-      M5.Lcd.printf("Calling...");
+      screenOn = true;
+      u8g2_prepare();
+      u8g2.clearBuffer();
+      u8g2.drawUTF8(3, 3, "Incoming call!");
       break;
     case 1:
-      M5.Axp.ScreenBreath(0);
-      M5.Lcd.fillScreen(BLACK);
+      u8g2.clearBuffer();
       break;
     }
+    u8g2.sendBuffer();
   }else
-  if(590 < second_x10 || second_x10 < 10){
+  if(590 < second_x10 || second_x10 < 10 || digitalRead(BtnPin) == LOW){
   //if(second_x10 % 100 < 10){
   //if(second_x10 % 20 == 0){
-    uint16_t c0 = ORANGE;
-    uint16_t c1 = BLACK;
-    if(minute == 0){
-      M5.Axp.ScreenBreath(15);
-      c0 = BLACK;
-      c1 = ORANGE;
-    }else
-    if(minute % 15 == 0){
-      M5.Axp.ScreenBreath(12);
-      c0 = BLACK;
-      c1 = ORANGE;
-    }else{
-      M5.Axp.ScreenBreath(7);
+    screenOn = true;
+    u8g2_prepare();
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_fub20_tf);
+    char timeStr[8];
+    snprintf(timeStr, sizeof(timeStr), "%02d %02d", hour, minute);
+    u8g2.drawStr(3, 3, timeStr);
+    if (second_x10 % 10 < 5) {
+          snprintf(timeStr, sizeof(timeStr), "%02d", hour);
+          int w = u8g2.getStrWidth(timeStr);
+          u8g2.drawGlyph(3 + w, 3, ':');
     }
+    u8g2.setFont(u8g2_font_6x10_tf);
+    char dateStr[20] {};
+    if (rtc_time) {
+      strftime(dateStr, sizeof(dateStr), "%a, %d %b %Y", rtc_time);
+      u8g2.drawStr(3, 30, dateStr);
+    }
+    if (toral_count) {
+      char notifStr[20];
+      snprintf(notifStr, sizeof(notifStr), "Notifications: %d", toral_count);
+      u8g2.drawStr(3, 50, notifStr);
+    }
+    char chargeStr[6];
+    int level = M5.Power.getBatteryLevel();
 
-    M5.Lcd.setCursor(3, 3, 7);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.setTextColor(c0, c1);
-    M5.Lcd.printf("%02d:%02d", hour, minute);
+    if (level >= 0) {
+      char battChar = '0' + (level / 20);
+      u8g2.setFont(u8g2_font_battery19_tn);
+      u8g2.drawGlyph(90, 3, battChar);
+      int chargeChar = M5.Power.isChargeFull() ? 0x73 : (M5.Power.isCharging() ? 0x60 : 0x0);
+      u8g2.setFont(u8g2_font_open_iconic_all_2x_t);
+      u8g2.drawGlyph(96, 3, chargeChar);
+    }
+    u8g2.sendBuffer();
   }else{
-    M5.Axp.ScreenBreath(0);
-    M5.Lcd.fillScreen(BLACK);
+    if (screenOn) {
+#if 0
+      u8g2.setPowerSave(1);
+#else
+      u8g2_prepare();
+      u8g2.clearBuffer();
+      //u8g2.setFont(u8g2_font_fur20_tf);
+      u8g2.setFont(u8g2_font_6x10_tf);
+
+      char timeStr[8];
+      snprintf(timeStr, sizeof(timeStr), "%02d %02d", hour, minute);
+      u8g2.drawStr(3, 3, timeStr);
+      snprintf(timeStr, sizeof(timeStr), "%02d", hour);
+      int w = u8g2.getStrWidth(timeStr);
+      u8g2.drawGlyph(3 + w, 3, ':');
+      if (toral_count) {
+        u8g2.drawGlyph(3, 50, '.');
+      }
+      u8g2.sendBuffer();
+#endif
+      screenOn = false;
+    }
+    //u8g2.setPowerSave(1);
+    //u8g2.sendBuffer();
   }
+
 }
