@@ -10,16 +10,6 @@
 // surplus macro from M5Stack LCD library
 #undef setFont
 
-#if 0
-  #include "core_version.h"
-  #ifndef ARDUINO_ESP32_RELEASE_1_0_3
-    #error "WARNING: version changed."
-  #endif
-  #if ARDUINO_ESP32_GIT_VER != 0x07390157
-    #error "WARNING: version changed."
-  #endif
-#endif
-
 static char LOG_TAG[] = "SampleServer";
 
 static BLEUUID ancsServiceUUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
@@ -63,7 +53,7 @@ bool connected = false;
 
 #define CATEGORY_TABLE_SIZE 12
 int notification_counts[CATEGORY_TABLE_SIZE] = {0,0,0,0,0,0,0,0,0,0,0,0};
-char* category_table[CATEGORY_TABLE_SIZE] = {
+const char* category_table[CATEGORY_TABLE_SIZE] = {
   "Other",         //  0
   "Incoming call", //  1
   "Missed call",   //  2
@@ -248,7 +238,9 @@ class MainBLEServer: public Task, public BLEServerCallbacks {
         pAdvertising->start();
         
         ESP_LOGD(LOG_TAG, "Advertising started!");
-        delay(portMAX_DELAY);
+        while (true) {
+          delay(portMAX_DELAY);
+        }
     }
 
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
@@ -322,10 +314,16 @@ void SampleSecureServer(void)
 #define BuzzerPin 26
 #define BtnPin 35
 U8G2_SH1107_64X128_F_4W_HW_SPI u8g2(U8G2_R1, 14, /* dc=*/ 27, /* reset=*/ 33);
-#define IP5306_REG_SYS_CTL1 (0x01)
-#define BOOST_ENABLE_BIT (0x20)
-#define IP5306_ADDR (117) // 0x75
-#define CURRENT_100MA  (0x01 << 0)
+const int CURRENT_100MA = (0x01 << 0);
+
+void u8g2_setup()
+{
+  u8g2.begin();
+  u8g2.setFontRefHeightExtendedText();
+  u8g2.setFontDirection(0);
+  u8g2.setDrawColor(1);
+  u8g2.setFontPosTop();
+}
 
 void setup()
 {
@@ -333,7 +331,7 @@ void setup()
   M5.Power.begin();
   M5.Power.setPowerBoostKeepOn(true);
   M5.Power.setVinMaxCurrent(CURRENT_100MA);
-  u8g2.begin();
+  u8g2_setup();
   pinMode(LedPin, OUTPUT);
   digitalWrite(LedPin, LOW);
   pinMode(BtnPin, INPUT_PULLUP);
@@ -347,7 +345,7 @@ void loop()
 {
     bool led = false;
     toral_count = 0;
-    for(int i=0; i<CATEGORY_TABLE_SIZE; i++){
+    for(int i=0; i < CATEGORY_TABLE_SIZE; i++){
         toral_count += notification_counts[i];
     }
     if(!connected && 3*1000 < millis()){
@@ -364,20 +362,11 @@ void loop()
     delay(50);
 }
 
-void u8g2_prepare(void) {
+void u8g2_prepare() {
   u8g2.setPowerSave(0);
-  u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.setFontRefHeightExtendedText();
-  u8g2.setDrawColor(1);
-  u8g2.setFontPosTop();
-  u8g2.setFontDirection(0);
-  u8g2.setContrast(10);
-}
-
-void fillBuffer(uint8_t color)
-{
-    u8g2.setDrawColor(color);
-    u8g2.drawBox(0, 0, u8g2.getDisplayWidth(), u8g2.getDisplayHeight());
+  u8g2.setFont(u8g2_font_8x13B_tf);
+  u8g2.setContrast(150);
+  u8g2.clearBuffer();
 }
 
 void display()
@@ -389,55 +378,53 @@ void display()
   last_counter = counter;
   static struct tm* rtc_time {};
   static bool screenOn = true;
+  static int minute  = 0;
+  static int hour = 0;
+  int second_x10 = (counter + counter_offset) % 600;
+  if (598 < second_x10 || second_x10 < 2) {
+    minute = (counter + counter_offset) / 600 % 60;
+    hour = (counter + counter_offset) / 36000 % 24;
+    screenOn = true;
+  }
 
-  int second_x10 = (counter + counter_offset) %600;
-  int minute     = (counter + counter_offset) /10/60%60;
-  int hour       = (counter + counter_offset) /10/3600%24;
-
-  if(counter_offset == -1 || (minute%10==0 && second_x10==0)){
+  if (counter_offset == -1 || (second_x10 < 2 && minute % 10 == 0)) {
     if (!timeOffset) {
       return;
     }
     time_t now = time(0) + timeOffset;
     rtc_time = localtime(&now);
     Serial.printf("RTC=%s hour=%d minute=%d second_x10=%d counter_offset=%d\n", asctime(rtc_time), hour, minute, second_x10, counter_offset);
-    counter_offset = 10 * ((rtc_time->tm_hour - counter/10/3600%24) * 3600 + (rtc_time->tm_min - counter/10/60%60) * 60 + (rtc_time->tm_sec - counter/10%60));
+    counter_offset = 10 * ((rtc_time->tm_hour - counter / 36000 % 24) * 3600 + (rtc_time->tm_min - counter / 600 % 60) * 60 + (rtc_time->tm_sec - counter / 10 % 60));
     Serial.printf("new counter_offset=%d\n", counter_offset);
-  }else
-  if(!connected && 300 < counter){
-    switch(counter / 3 % 2){
+    minute = (counter + counter_offset) / 600 % 60;
+    hour = (counter + counter_offset) /36000 % 24;
+  } else  if (!connected && 300 < counter) {
+    switch(counter / 3 % 2) {
     case 0:
       screenOn = true;
       u8g2_prepare();
-      u8g2.clearBuffer();
-      u8g2.drawUTF8(3, 3, "Misplaced!?");
+      u8g2.drawUTF8(3, 25, "Misplaced!?");
       break;
     case 1:
       u8g2.clearBuffer();
       break;
     }
     u8g2.sendBuffer();
-  }else
-  if(0 < notification_counts[CATEGORY_INCOMING_CALL]){
+  } else if (0 < notification_counts[CATEGORY_INCOMING_CALL]) {
     switch(counter / 10 % 2){
     case 0:
       screenOn = true;
       u8g2_prepare();
-      u8g2.clearBuffer();
-      u8g2.drawUTF8(3, 3, "Incoming call!");
+      u8g2.drawUTF8(3, 25, "Incoming call!");
       break;
     case 1:
       u8g2.clearBuffer();
       break;
     }
     u8g2.sendBuffer();
-  }else
-  if(590 < second_x10 || second_x10 < 10 || digitalRead(BtnPin) == LOW){
-  //if(second_x10 % 100 < 10){
-  //if(second_x10 % 20 == 0){
+  } else if (digitalRead(BtnPin) == LOW) {
     screenOn = true;
     u8g2_prepare();
-    u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_fub20_tf);
     char timeStr[8];
     snprintf(timeStr, sizeof(timeStr), "%02d %02d", hour, minute);
@@ -458,28 +445,29 @@ void display()
       snprintf(notifStr, sizeof(notifStr), "Notifications: %d", toral_count);
       u8g2.drawStr(3, 50, notifStr);
     }
-    char chargeStr[6];
     int level = M5.Power.getBatteryLevel();
 
     if (level >= 0) {
       char battChar = '0' + (level / 20);
       u8g2.setFont(u8g2_font_battery19_tn);
       u8g2.drawGlyph(90, 3, battChar);
-      int chargeChar = M5.Power.isChargeFull() ? 0x73 : (M5.Power.isCharging() ? 0x60 : 0x0);
+      const char okChar = 0x73;
+      const char boltChar = 0x60;
+      const char noChar = 0;
+      char chargeChar = M5.Power.isChargeFull() ? okChar : (M5.Power.isCharging() ? boltChar : noChar);
       u8g2.setFont(u8g2_font_open_iconic_all_2x_t);
       u8g2.drawGlyph(96, 3, chargeChar);
     }
     u8g2.sendBuffer();
-  }else{
+  } else {
     if (screenOn) {
-#if 0
+#if 0 // No always-on display
       u8g2.setPowerSave(1);
-#else
+#else // Always-on display
       u8g2_prepare();
-      u8g2.clearBuffer();
+      u8g2.setContrast(0);
       //u8g2.setFont(u8g2_font_fur20_tf);
       u8g2.setFont(u8g2_font_6x10_tf);
-
       char timeStr[8];
       snprintf(timeStr, sizeof(timeStr), "%02d %02d", hour, minute);
       u8g2.drawStr(3, 3, timeStr);
@@ -493,8 +481,6 @@ void display()
 #endif
       screenOn = false;
     }
-    //u8g2.setPowerSave(1);
-    //u8g2.sendBuffer();
   }
 
 }
